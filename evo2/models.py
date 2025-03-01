@@ -1,3 +1,4 @@
+import io
 from functools import partial
 import huggingface_hub
 from huggingface_hub import hf_hub_download, constants
@@ -11,13 +12,20 @@ import yaml
 from vortex.model.generation import generate as vortex_generate
 from vortex.model.model import StripedHyena
 from vortex.model.tokenizer import CharLevelTokenizer
-from vortex.model.utils import dotdict, print_rank_0, load_checkpoint
+from vortex.model.utils import dotdict, fixup_fp8_extra_states, load_checkpoint
+
 
 from evo2.scoring import score_sequences, score_sequences_rc
 from evo2.utils import MODEL_NAMES, HF_MODEL_NAME_MAP, CONFIG_MAP
 
+
 class Evo2:
-    def __init__(self, model_name: str = MODEL_NAMES[1], local_path: str = None):
+    def __init__(
+        self,
+        model_name: str = MODEL_NAMES[1],
+        local_path: str = None,
+        device: int = None,
+    ):
         """
         Load an Evo 2 checkpoint.
 
@@ -36,19 +44,19 @@ class Evo2:
         """
         if model_name not in MODEL_NAMES:
             raise ValueError(
-                f'Invalid model name {model_name}. Should be one of: '
-                f'{", ".join(MODEL_NAMES)}.'
+                f"Invalid model name {model_name}. Should be one of: "
+                f"{', '.join(MODEL_NAMES)}."
             )
 
         config_path = CONFIG_MAP[model_name]
 
         if local_path is not None:
-            self.model = self.load_evo2_model(None, config_path, local_path)
+            self.model = self.load_evo2_model(None, config_path, local_path, device)
         else:
-            self.model = self.load_evo2_model(model_name, config_path)
-        
+            self.model = self.load_evo2_model(model_name, config_path, device)
+
         self.tokenizer = CharLevelTokenizer(512)
-    
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -57,48 +65,49 @@ class Evo2:
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """
         Forward pass with optional embedding extraction.
-        
+
         Args:
             input_ids: Input token IDs
             return_embeddings: If True, returns embeddings from specified layers
             layer_names: List of layer names to extract embeddings from. Required if
                 return_embeddings=True
-            
+
         Returns:
             Tuple of (logits, embeddings_dict) if return_embeddings=True
             Tuple of (logits, None) otherwise
         """
         embeddings = {}
         handles = []
-        
+
         if return_embeddings:
             if layer_names is None:
                 raise ValueError(
                     "layer_names must be specified when return_embeddings=True. Look at "
                     "evo2_model.model.state_dict().keys() to see available layers."
                 )
-                
+
             def hook_fn(layer_name):
                 def hook(_, __, output):
                     if isinstance(output, tuple):
                         output = output[0]
                     embeddings[layer_name] = output.detach()
+
                 return hook
-                
+
             # Register hooks for requested layers
             for name in layer_names:
                 layer = self.model.get_submodule(name)
                 handles.append(layer.register_forward_hook(hook_fn(name)))
-        
+
         try:
             # Original forward pass
             with torch.no_grad():
                 logits = self.model.forward(input_ids)
-            
+
             if return_embeddings:
                 return logits, embeddings
             return logits, None
-            
+
         finally:
             for handle in handles:
                 handle.remove()
@@ -111,7 +120,7 @@ class Evo2:
         seqs: List[str],
         batch_size: int = 1,
         prepend_bos: bool = False,
-        reduce_method: str = 'mean',
+        reduce_method: str = "mean",
         average_reverse_complement: bool = False,
     ) -> List[float]:
         scoring_func = partial(
@@ -130,7 +139,7 @@ class Evo2:
                 raise RuntimeError(f"Error during sequence scoring: {str(e)}") from e
 
         return scores
-    
+
     def generate(
         self,
         prompt_seqs: List[str],
@@ -167,27 +176,28 @@ class Evo2:
             )
             return output
 
-
     def load_evo2_model(
-            self,
-            model_name: str = MODEL_NAMES[1],
-            config_path: str = None,
-            local_path: str = None,
+        self,
+        model_name: str = MODEL_NAMES[1],
+        config_path: str = None,
+        local_path: str = None,
+        device: int = None,
     ):
         """
         Load HuggingFace checkpoint using StripedHyena 2.
         """
         if local_path is not None:
-            print(f"Loading model from {local_path}...")
-            print(f"Loading config from {config_path}...")
-            config = dotdict(yaml.load(open(config_path), Loader=yaml.FullLoader))
-            model = StripedHyena(config)
-            load_checkpoint(model, local_path)
-            return model
-        
+            raise NotImplementedError
+            # print(f"Loading model from {local_path}...")
+            # print(f"Loading config from {config_path}...")
+            # config = dotdict(yaml.load(open(config_path), Loader=yaml.FullLoader))
+            # model = StripedHyena(config)
+            # load_checkpoint(model, local_path)
+            # return model
+
         hf_model_name = HF_MODEL_NAME_MAP[model_name]
         filename = f"{model_name}.pt"
-                
+
         # First try normal download
         try:
             weights_path = hf_hub_download(
@@ -198,7 +208,9 @@ class Evo2:
         except:
             print(f"Loading checkpoint shards for {filename}")
             # If file is split, get the first part's directory to use the same cache location
-            weights_path = os.path.join(os.path.dirname(constants.HF_HUB_CACHE), filename)
+            weights_path = os.path.join(
+                os.path.dirname(constants.HF_HUB_CACHE), filename
+            )
             if os.path.exists(weights_path):
                 print(f"Found {filename}")
             else:
@@ -207,21 +219,24 @@ class Evo2:
                 part_num = 0
                 while True:
                     try:
-                        part_path = hf_hub_download(repo_id=hf_model_name, filename=f"{filename}.part{part_num}")
+                        part_path = hf_hub_download(
+                            repo_id=hf_model_name, filename=f"{filename}.part{part_num}"
+                        )
                         parts.append(part_path)
                         part_num += 1
                     except huggingface_hub.errors.EntryNotFoundError:
                         break
 
-                # Join in the same directory 
-                with open(weights_path, 'wb') as outfile:
+                # Join in the same directory
+                with open(weights_path, "wb") as outfile:
                     for part in parts:
-                        with open(part, 'rb') as infile:
+                        with open(part, "rb") as infile:
                             while True:
-                                chunk = infile.read(8192*1024)
-                                if not chunk: break
+                                chunk = infile.read(8192 * 1024)
+                                if not chunk:
+                                    break
                                 outfile.write(chunk)
-                
+
                 # Cleaning up the parts
                 for part in parts:
                     try:
@@ -233,7 +248,7 @@ class Evo2:
         config = yaml.safe_load(pkgutil.get_data(__name__, config_path))
         global_config = dotdict(config, Loader=yaml.FullLoader)
 
-        model = StripedHyena(global_config)
+        model = StripedHyena(global_config, device)
         load_checkpoint(model, weights_path)
 
         return model
