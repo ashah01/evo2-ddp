@@ -19,6 +19,13 @@ pip install transformer_engine[pytorch] --no-build-isolation
 
 This last operation will likely fail due to its dependency on a CUDA executable. This can be circumvented, as per Zhibin, by installing CUDA locally in your home folder (good luck. this warrants a guide of its own). Alternatively, you might be able to install the cached downloads in the compute node.
 
+3. Download and cache the Evo2 model (in this case, the 1B model)
+```bash
+
+python -c "import huggingface_hub; huggingface_hub.hf_hub_download(repo_id='arcinstitute/evo2_1b_base', filename='evo2_1b_base.pt')"
+
+```
+
 ## On the compute cluster
 
 1. Start an interactive slurm session. You'll need at least one GPU.
