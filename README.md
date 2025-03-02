@@ -12,7 +12,7 @@ conda create -n evo2 python=3.11
 2. Install all build dependencies
 ```bash
 cd vortex
-pip install biopython huggingface_hub torch>=2.6.0 rich ruff pre-commit 
+pip install biopython huggingface_hub torch>=2.6.0 rich ruff pre-commit einops
 pip install .
 pip install transformer_engine[pytorch] --no-build-isolation
 ```
